@@ -18,6 +18,13 @@ use walkdir::WalkDir;
 fn main() {
     // Collect command-line arguments.
     let args: Vec<String> = env::args().collect();
+
+    // If -h or --help is provided as the first argument, display the help message.
+    if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
+        print_help();
+        return;
+    }
+
     // Parse the Git command from the provided arguments.
     let git_command = parse_git_command(&args);
 
@@ -58,4 +65,26 @@ fn parse_git_command(args: &[String]) -> String {
     } else {
         "status".to_string()
     }
+}
+
+/// Prints a short help message for grpr.
+fn print_help() {
+    println!(
+        r#"grpr - A CLI tool for recursively executing git commands.
+
+Usage:
+    grpr [git-command]
+
+If no git-command is provided, 'status' is used by default.
+
+Arguments:
+    -h, --help   Show this help message.
+
+Example:
+    grpr pull
+
+For a list of available git sub-commands, please visit:
+    https://git-scm.com/docs
+"#
+    );
 }
