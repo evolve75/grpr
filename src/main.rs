@@ -1,3 +1,12 @@
+/*
+ * grpr - A CLI tool for recursively executing git commands.
+ *
+ * Copyright (c) 2025 Anupam Sengupta
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 mod grpgit;
 
 use std::env;
@@ -13,8 +22,7 @@ fn main() {
     let git_command = parse_git_command(&args);
 
     // Get the current working directory.
-    let current_dir =
-        env::current_dir().expect("Failed to get current directory");
+    let current_dir = env::current_dir().expect("Failed to get current directory");
 
     // Create a processor closure to run the Git command.
     let git_processor = grpgit::create_git_processor(git_command);

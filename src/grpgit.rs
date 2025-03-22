@@ -1,3 +1,19 @@
+/*
+ * grpr - A CLI tool for recursively executing git commands.
+ *
+ * Copyright (c) 2025 Anupam Sengupta
+ *
+ * This source code is licensed under the MIT license found in the LICENSE file
+ * in the root directory of this source tree.
+ *
+ * Summary:
+ * This file (grpgit.rs) contains helper functions and type definitions for
+ * interacting with Git repositories. It provides functionality to check if a
+ * directory is a Git repository, execute Git commands within a repository,
+ * process directories based on whether they are Git repositories, and create
+ * closures to process Git commands in a modular fashion.
+ */
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -53,8 +69,7 @@ pub fn run_git_command(repo_path: &Path, command: &str) -> Result<(), String> {
 
     // Check if the command executed successfully.
     if !output.status.success() {
-        return Err(format!("Git command failed in {}",
-                           repo_path.display()));
+        return Err(format!("Git command failed in {}", repo_path.display()));
     }
 
     Ok(())
@@ -96,7 +111,5 @@ pub fn process_git_dir(
 /// * A closure that takes a path and returns a result after executing the Git
 ///   command.
 pub fn create_git_processor(command: GitCommand) -> impl Fn(&Path) -> Result<(), String> {
-    move |repo_path: &Path| -> Result<(), String> {
-        run_git_command(repo_path, &command)
-    }
+    move |repo_path: &Path| -> Result<(), String> { run_git_command(repo_path, &command) }
 }
