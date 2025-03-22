@@ -113,3 +113,54 @@ pub fn process_git_dir(
 pub fn create_git_processor(command: GitCommand) -> impl Fn(&Path) -> Result<(), String> {
     move |repo_path: &Path| -> Result<(), String> { run_git_command(repo_path, &command) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_is_git_repo() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        // Initially, no .git directory exists.
+        assert!(!is_git_repo(&path));
+
+        // Create a .git directory and test again.
+        fs::create_dir_all(path.join(".git")).unwrap();
+        assert!(is_git_repo(&path));
+    }
+
+    #[test]
+    fn test_process_git_dir_without_git() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        // Dummy processor that always returns Ok.
+        let processor = |_: &Path| -> Result<(), String> { Ok(()) };
+        // Since no .git directory exists, process_git_dir should simply return Ok.
+        assert!(process_git_dir(&path, &processor).is_ok());
+    }
+
+    #[test]
+    fn test_process_git_dir_with_git() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        // Create a .git directory.
+        fs::create_dir_all(path.join(".git")).unwrap();
+
+        // Dummy processor that returns Ok.
+        let processor = |_: &Path| -> Result<(), String> { Ok(()) };
+        assert!(process_git_dir(&path, &processor).is_ok());
+    }
+
+    #[test]
+    fn test_create_git_processor_runs_command() {
+        // We use a known git command. `git --version` should work in any directory.
+        let processor = create_git_processor("--version".to_string());
+        // Even though current directory might not be a git repo, `git --version`
+        // works globally.
+        let result = processor(Path::new("."));
+        assert!(result.is_ok());
+    }
+}

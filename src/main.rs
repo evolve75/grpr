@@ -88,3 +88,22 @@ For a list of available git sub-commands, please visit:
 "#
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_git_command_with_args() {
+        let args = vec!["grpr".to_string(), "pull".to_string()];
+        let cmd = parse_git_command(&args);
+        assert_eq!(cmd, "pull");
+    }
+
+    #[test]
+    fn test_parse_git_command_default() {
+        let args = vec!["grpr".to_string()];
+        let cmd = parse_git_command(&args);
+        assert_eq!(cmd, "status");
+    }
+}
