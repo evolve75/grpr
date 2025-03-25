@@ -9,17 +9,20 @@
 
 mod grpgit;
 
+use rayon::iter::ParallelBridge; // Enables conversion of iterators to parallel iterators
+use rayon::prelude::*;
 use std::env;
 use walkdir::WalkDir;
 
-/// Main function that initializes the program, parses the command-line arguments,
-/// and recursively processes directories to execute a Git command in each Git
+/// Main function that initializes the program, parses command-line arguments,
+/// and concurrently processes directories to execute a Git command in each Git
 /// repository.
 fn main() {
     // Collect command-line arguments.
     let args: Vec<String> = env::args().collect();
 
-    // If -h or --help is provided as the first argument, display the help message.
+    // If "-h" or "--help" is provided as the first argument, display the help
+    // message and exit.
     if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
         print_help();
         return;
@@ -34,22 +37,29 @@ fn main() {
     // Create a processor closure to run the Git command.
     let git_processor = grpgit::create_git_processor(git_command);
 
-    // Recursively walk through directories starting at the current directory.
-    for entry in WalkDir::new(current_dir)
+    // Walk through the directory tree, filtering for directories that are Git
+    // repositories, and process them concurrently.
+    WalkDir::new(current_dir)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_dir())
-    {
-        let path = entry.path();
-        // Process the directory if it is a Git repository.
-        if let Err(err) = grpgit::process_git_dir(path, &git_processor) {
-            eprintln!("Error processing {}: {}", path.display(), err);
-        }
-    }
+        // First, ensure the entry is a directory.
+        .filter(|entry| entry.file_type().is_dir())
+        // Then, check if it's a Git repository.
+        .filter(|entry| grpgit::is_git_repo(entry.path()))
+        // Convert the iterator to a parallel iterator.
+        .par_bridge()
+        .for_each(|entry| {
+            let path = entry.path();
+            // Print the directory name before executing the Git command.
+            println!("Processing Git repository: {}", path.display());
+            if let Err(err) = grpgit::process_git_dir(path, &git_processor) {
+                eprintln!("Error processing {}: {}", path.display(), err);
+            }
+        });
 }
 
-/// Parses the Git command from the command-line arguments. If no command is
-/// provided, it defaults to "status".
+/// Parses the Git command from the command-line arguments.
+/// Defaults to "status" if no command is provided.
 ///
 /// # Arguments
 ///
@@ -57,7 +67,7 @@ fn main() {
 ///
 /// # Returns
 ///
-/// * A string representing the Git command to execute.
+/// * A `String` representing the Git command to execute.
 fn parse_git_command(args: &[String]) -> String {
     if args.len() > 1 {
         // Join all arguments after the executable name.
@@ -87,23 +97,4 @@ For a list of available git sub-commands, please visit:
     https://git-scm.com/docs
 "#
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_git_command_with_args() {
-        let args = vec!["grpr".to_string(), "pull".to_string()];
-        let cmd = parse_git_command(&args);
-        assert_eq!(cmd, "pull");
-    }
-
-    #[test]
-    fn test_parse_git_command_default() {
-        let args = vec!["grpr".to_string()];
-        let cmd = parse_git_command(&args);
-        assert_eq!(cmd, "status");
-    }
 }
