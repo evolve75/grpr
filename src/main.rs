@@ -7,94 +7,149 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-mod grpgit;
-
-use rayon::iter::ParallelBridge; // Enables conversion of iterators to parallel iterators
+use clap::Parser;
+use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use std::env;
+use std::error::Error;
+use std::path::Path;
 use walkdir::WalkDir;
 
-/// Main function that initializes the program, parses command-line arguments,
-/// and concurrently processes directories to execute a Git command in each Git
-/// repository.
-fn main() {
-    // Collect command-line arguments.
-    let args: Vec<String> = env::args().collect();
+mod grpgit;
 
-    // If "-h" or "--help" is provided as the first argument, display the help
-    // message and exit.
-    if args.len() > 1 && (args[1] == "-h" || args[1] == "--help") {
-        print_help();
-        return;
+/// CLI represents the command-line arguments for grpr.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// The number of threads to use for concurrent processing (default: system default,
+    /// i.e. number of logical CPUs).
+    #[arg(
+        short,
+        long,
+        help = "The number of threads to use for concurrent processing (default: system default, i.e. number of logical CPUs)"
+    )]
+    threads: Option<usize>,
+
+    /// The git command and its arguments to execute (e.g., "pull", "status", etc.).
+    /// Defaults to "status" if not provided.
+    #[arg(required = false, num_args = 1..)]
+    command: Vec<String>,
+}
+
+/// Sets up the Rayon thread pool if a thread count is provided.
+fn setup_thread_pool(threads: Option<usize>) -> Result<(), Box<dyn Error>> {
+    if let Some(t) = threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(t)
+            .build_global()?;
     }
+    Ok(())
+}
 
-    // Parse the Git command from the provided arguments.
-    let git_command = parse_git_command(&args);
+/// Extracts the git command from the CLI arguments.
+/// Defaults to "status" if no command is provided.
+fn get_command_from_cli(cli: &Cli) -> String {
+    if cli.command.is_empty() {
+        "status".to_string()
+    } else {
+        cli.command.join(" ")
+    }
+}
 
-    // Get the current working directory.
-    let current_dir = env::current_dir().expect("Failed to get current directory");
-
-    // Create a processor closure to run the Git command.
-    let git_processor = grpgit::create_git_processor(git_command);
-
-    // Walk through the directory tree, filtering for directories that are Git
-    // repositories, and process them concurrently.
+/// Processes repositories found under `current_dir` using the provided `git_processor`
+/// function concurrently.
+///
+/// The function uses a generic parameter `F` to ensure that `git_processor` implements
+/// both `Fn(&Path) -> Result<(), String>` and `Sync`.
+fn process_repositories<F>(current_dir: &Path, git_processor: &F)
+where
+    F: Fn(&Path) -> Result<(), String> + Sync,
+{
     WalkDir::new(current_dir)
         .into_iter()
         .filter_map(Result::ok)
-        // First, ensure the entry is a directory.
         .filter(|entry| entry.file_type().is_dir())
-        // Then, check if it's a Git repository.
         .filter(|entry| grpgit::is_git_repo(entry.path()))
-        // Convert the iterator to a parallel iterator.
         .par_bridge()
         .for_each(|entry| {
             let path = entry.path();
-            // Print the directory name before executing the Git command.
             println!("Processing Git repository: {}", path.display());
-            if let Err(err) = grpgit::process_git_dir(path, &git_processor) {
+            if let Err(err) = grpgit::process_git_dir(path, git_processor) {
                 eprintln!("Error processing {}: {}", path.display(), err);
             }
         });
 }
 
-/// Parses the Git command from the command-line arguments.
-/// Defaults to "status" if no command is provided.
-///
-/// # Arguments
-///
-/// * `args` - The list of command-line arguments.
-///
-/// # Returns
-///
-/// * A `String` representing the Git command to execute.
-fn parse_git_command(args: &[String]) -> String {
-    if args.len() > 1 {
-        // Join all arguments after the executable name.
-        args[1..].join(" ")
-    } else {
-        "status".to_string()
-    }
+/// Main function initializes the program, parses CLI arguments, sets up the thread pool,
+/// and concurrently processes directories to execute a Git command in each Git repository.
+fn main() -> Result<(), Box<dyn Error>> {
+    // Parse command-line arguments using Clap.
+    let cli = Cli::parse();
+
+    // Set up the Rayon thread pool if needed.
+    setup_thread_pool(cli.threads)?;
+
+    // Determine the git command from CLI.
+    let command = get_command_from_cli(&cli);
+
+    // Get the current working directory.
+    let current_dir = env::current_dir()?;
+
+    // Create a processor closure that will run the Git command.
+    let git_processor = grpgit::create_git_processor(command);
+
+    // Process repositories concurrently.
+    process_repositories(current_dir.as_path(), &git_processor);
+
+    Ok(())
 }
 
-/// Prints a short help message for grpr.
-fn print_help() {
-    println!(
-        r#"grpr - A CLI tool for recursively executing git commands.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use std::fs;
+    use tempfile::tempdir;
 
-Usage:
-    grpr [git-command]
+    #[test]
+    fn test_get_command_from_cli_default() {
+        let cli = Cli::parse_from(&["grpr"]);
+        let cmd = get_command_from_cli(&cli);
+        assert_eq!(cmd, "status");
+    }
 
-If no git-command is provided, 'status' is used by default.
+    #[test]
+    fn test_get_command_from_cli_join() {
+        let cli = Cli::parse_from(&["grpr", "pull", "origin", "master"]);
+        let cmd = get_command_from_cli(&cli);
+        assert_eq!(cmd, "pull origin master");
+    }
 
-Arguments:
-    -h, --help   Show this help message.
+    #[test]
+    fn test_setup_thread_pool_default() {
+        // If no thread count is provided, the setup should succeed without error.
+        assert!(setup_thread_pool(None).is_ok());
+    }
 
-Example:
-    grpr pull
+    #[test]
+    fn test_setup_thread_pool_custom() {
+        // Providing a thread count should also succeed.
+        assert!(setup_thread_pool(Some(4)).is_ok());
+    }
 
-For a list of available git sub-commands, please visit:
-    https://git-scm.com/docs
-"#
-    );
+    #[test]
+    fn test_process_repositories() {
+        // Create a temporary directory structure with a fake git repository.
+        let temp_dir = tempdir().unwrap();
+        let repo_dir = temp_dir.path().join("fake_repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        // Create a dummy .git directory inside fake_repo.
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+
+        // Create a dummy git_processor that always returns Ok.
+        let dummy_processor = |_: &Path| -> Result<(), String> { Ok(()) };
+
+        // Run process_repositories; if no panic occurs, assume success.
+        process_repositories(temp_dir.path(), &dummy_processor);
+    }
 }
