@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn test_setup_thread_pool_custom() {
         // Providing a thread count should also succeed.
-        assert!(setup_thread_pool(Some(2)).is_ok());
+        assert!(setup_thread_pool(Some(1)).is_ok());
     }
 
     #[test]
