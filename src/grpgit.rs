@@ -5,113 +5,105 @@
  *
  * This source code is licensed under the MIT license found in the LICENSE file
  * in the root directory of this source tree.
- *
- * Summary:
- * This file (grpgit.rs) contains helper functions and type definitions for
- * interacting with Git repositories. It provides functionality to check if a
- * directory is a Git repository, execute Git commands within a repository,
- * process directories based on whether they are Git repositories, and create
- * closures to process Git commands in a modular fashion.
  */
 
-use std::path::Path;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use walkdir::WalkDir;
 
-/// Type alias for a Git command, represented as a string. This can be
-/// something like "status", "pull", etc.
-pub type GitCommand = String;
+const GIT_PATH_NAME: &str = ".git";
+const GIT_CONFIG_NAME: &str = "config";
+const GITDIR_PREFIX: &str = "gitdir:";
 
-/// Checks whether the given path is a Git repository by verifying the existence
-/// of a ".git" directory.
-///
-/// # Arguments
-///
-/// * `path` - The path to check.
-///
-/// # Returns
-///
-/// * `true` if the ".git" directory exists in the given path.
-/// * `false` otherwise.
-pub fn is_git_repo(path: &Path) -> bool {
-    path.join(".git").is_dir()
+/// Classifies the git repository type discovered at a directory path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryKind {
+    Regular,
+    Worktree,
 }
 
-/// Executes a Git command in the provided repository path.
+/// Detects whether `path` is a supported git repository root.
 ///
-/// The function splits the command into the Git subcommand and its arguments,
-/// executes it in the given directory, and prints the output to stdout and
-/// stderr.
-///
-/// # Arguments
-///
-/// * `repo_path` - The path of the Git repository.
-/// * `command` - The Git command to execute (e.g., "pull", "status").
-///
-/// # Returns
-///
-/// * `Ok(())` if the command executed successfully.
-/// * `Err(String)` if there was an error.
-pub fn run_git_command(repo_path: &Path, command: &str) -> Result<(), String> {
-    // Split the command string into the subcommand and arguments.
-    let mut parts = command.split_whitespace();
-    let subcommand = parts.next().ok_or("Empty git command")?;
-    let args: Vec<&str> = parts.collect();
+/// Regular repositories must contain a `.git/config` file. Worktrees are
+/// identified by a `.git` file whose trimmed contents start with `gitdir:`.
+pub fn detect_repository(path: &Path) -> Option<RepositoryKind> {
+    if !path.is_dir() {
+        return None;
+    }
 
-    // Execute the git command in the specified repository directory.
-    let output = Command::new("git")
-        .arg(subcommand)
-        .args(&args)
+    let git_path = path.join(GIT_PATH_NAME);
+    let git_metadata = fs::metadata(&git_path).ok()?;
+
+    if git_metadata.is_dir() {
+        let config_path = git_path.join(GIT_CONFIG_NAME);
+        return config_path.is_file().then_some(RepositoryKind::Regular);
+    }
+
+    if git_metadata.is_file() {
+        let contents = fs::read_to_string(&git_path).ok()?;
+        return contents
+            .trim_start()
+            .starts_with(GITDIR_PREFIX)
+            .then_some(RepositoryKind::Worktree);
+    }
+
+    None
+}
+
+/// Discovers git repositories under `root`, skipping descendants of any
+/// repository that is found.
+pub fn discover_repositories(root: &Path) -> Vec<PathBuf> {
+    let mut repositories = Vec::new();
+    let mut walker = WalkDir::new(root).into_iter();
+
+    while let Some(entry_result) = walker.next() {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(err) => {
+                eprintln!("Error walking directory tree: {err}");
+                continue;
+            }
+        };
+
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        if detect_repository(entry.path()).is_some() {
+            repositories.push(entry.into_path());
+            walker.skip_current_dir();
+        }
+    }
+
+    repositories
+}
+
+/// Executes a git command in the provided repository path.
+pub fn run_git_command(repo_path: &Path, args: &[String]) -> Result<(), io::Error> {
+    let status = Command::new("git")
+        .args(args.iter().map(OsStr::new))
         .current_dir(repo_path)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| format!("Failed to run git command: {}", e))?;
+        .status()?;
 
-    // Check if the command executed successfully.
-    if !output.status.success() {
-        return Err(format!("Git command failed in {}", repo_path.display()));
-    }
-
-    Ok(())
-}
-
-/// Processes a directory: if it is a Git repository, the provided processor
-/// function is executed.
-///
-/// # Arguments
-///
-/// * `path` - The directory path to process.
-/// * `processor` - A function that takes a path and returns a result.
-///
-/// # Returns
-///
-/// * `Ok(())` if processing was successful or if the directory is not a Git
-///   repository.
-/// * `Err(String)` if there was an error during processing.
-pub fn process_git_dir(
-    path: &Path,
-    processor: &impl Fn(&Path) -> Result<(), String>,
-) -> Result<(), String> {
-    if is_git_repo(path) {
-        processor(path)
-    } else {
+    if status.success() {
         Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "git command failed in {} with status {status}",
+            repo_path.display()
+        )))
     }
 }
 
-/// Creates and returns a closure that executes the provided Git command in a
-/// given repository path.
-///
-/// # Arguments
-///
-/// * `command` - The Git command to execute.
-///
-/// # Returns
-///
-/// * A closure that takes a path and returns a result after executing the Git
-///   command.
-pub fn create_git_processor(command: GitCommand) -> impl Fn(&Path) -> Result<(), String> {
-    move |repo_path: &Path| -> Result<(), String> { run_git_command(repo_path, &command) }
+/// Prints the repository being processed and runs the git command in it.
+pub fn process_repository(repo_path: &Path, args: &[String]) -> Result<(), io::Error> {
+    println!("Inside git repo: {}", repo_path.display());
+    run_git_command(repo_path, args)
 }
 
 #[cfg(test)]
@@ -120,47 +112,125 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_is_git_repo() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
-        // Initially, no .git directory exists.
-        assert!(!is_git_repo(&path));
-
-        // Create a .git directory and test again.
-        fs::create_dir_all(path.join(".git")).unwrap();
-        assert!(is_git_repo(&path));
+    fn create_regular_repo(path: &Path) {
+        let git_dir = path.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("config"), "[core]\n").unwrap();
     }
 
     #[test]
-    fn test_process_git_dir_without_git() {
+    fn detect_repository_identifies_valid_regular_repo() {
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
-        // Dummy processor that always returns Ok.
-        let processor = |_: &Path| -> Result<(), String> { Ok(()) };
-        // Since no .git directory exists, process_git_dir should simply return Ok.
-        assert!(process_git_dir(&path, &processor).is_ok());
+        let repo_dir = dir.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        create_regular_repo(&repo_dir);
+
+        assert_eq!(detect_repository(&repo_dir), Some(RepositoryKind::Regular));
     }
 
     #[test]
-    fn test_process_git_dir_with_git() {
+    fn detect_repository_rejects_missing_config() {
         let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
-        // Create a .git directory.
-        fs::create_dir_all(path.join(".git")).unwrap();
+        let repo_dir = dir.path().join("repo");
+        fs::create_dir_all(repo_dir.join(".git")).unwrap();
 
-        // Dummy processor that returns Ok.
-        let processor = |_: &Path| -> Result<(), String> { Ok(()) };
-        assert!(process_git_dir(&path, &processor).is_ok());
+        assert_eq!(detect_repository(&repo_dir), None);
     }
 
     #[test]
-    fn test_create_git_processor_runs_command() {
-        // We use a known git command. `git --version` should work in any directory.
-        let processor = create_git_processor("--version".to_string());
-        // Even though current directory might not be a git repo, `git --version`
-        // works globally.
-        let result = processor(Path::new("."));
-        assert!(result.is_ok());
+    fn detect_repository_identifies_valid_worktree() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("worktree");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(
+            repo_dir.join(".git"),
+            "gitdir: /path/to/repo/.git/worktrees/topic\n",
+        )
+        .unwrap();
+
+        assert_eq!(detect_repository(&repo_dir), Some(RepositoryKind::Worktree));
+    }
+
+    #[test]
+    fn detect_repository_rejects_invalid_worktree_file() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("worktree");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(repo_dir.join(".git"), "not a gitdir reference\n").unwrap();
+
+        assert_eq!(detect_repository(&repo_dir), None);
+    }
+
+    #[test]
+    fn detect_repository_rejects_empty_worktree_file() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("worktree");
+        fs::create_dir_all(&repo_dir).unwrap();
+        fs::write(repo_dir.join(".git"), "").unwrap();
+
+        assert_eq!(detect_repository(&repo_dir), None);
+    }
+
+    #[test]
+    fn detect_repository_rejects_file_paths() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("not-a-dir");
+        fs::write(&file_path, "test").unwrap();
+
+        assert_eq!(detect_repository(&file_path), None);
+    }
+
+    #[test]
+    fn detect_repository_rejects_missing_paths() {
+        let dir = tempdir().unwrap();
+        let missing_path = dir.path().join("missing");
+
+        assert_eq!(detect_repository(&missing_path), None);
+    }
+
+    #[test]
+    fn discover_repositories_skips_descendants_of_found_repositories() {
+        let dir = tempdir().unwrap();
+        let parent_repo = dir.path().join("parent");
+        let nested_repo = parent_repo.join("nested");
+        let sibling_repo = dir.path().join("sibling");
+
+        fs::create_dir_all(&nested_repo).unwrap();
+        fs::create_dir_all(&sibling_repo).unwrap();
+        create_regular_repo(&parent_repo);
+        create_regular_repo(&nested_repo);
+        create_regular_repo(&sibling_repo);
+
+        let mut discovered = discover_repositories(dir.path());
+        discovered.sort();
+
+        assert_eq!(discovered, vec![parent_repo, sibling_repo]);
+    }
+
+    #[test]
+    fn discover_repositories_handles_root_repository() {
+        let dir = tempdir().unwrap();
+        create_regular_repo(dir.path());
+        let nested_repo = dir.path().join("nested");
+        fs::create_dir_all(&nested_repo).unwrap();
+        create_regular_repo(&nested_repo);
+
+        let discovered = discover_repositories(dir.path());
+
+        assert_eq!(discovered, vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn run_git_command_accepts_multi_argument_commands() {
+        let dir = tempdir().unwrap();
+        let status = Command::new("git")
+            .arg("init")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let args = vec!["status".to_string(), "--short".to_string()];
+        assert!(run_git_command(dir.path(), &args).is_ok());
     }
 }

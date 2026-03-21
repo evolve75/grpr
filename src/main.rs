@@ -8,12 +8,10 @@
  */
 
 use clap::Parser;
-use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use std::env;
 use std::error::Error;
-use std::path::Path;
-use walkdir::WalkDir;
+use std::path::{Path, PathBuf};
 
 mod grpgit;
 
@@ -21,87 +19,75 @@ mod grpgit;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// The number of threads to use for concurrent processing (default: system default,
-    /// i.e. number of logical CPUs).
+    /// The number of threads to use for concurrent processing. When omitted,
+    /// grpr scans and processes repositories sequentially for predictable
+    /// output and compatibility with grp.
     #[arg(
         short,
         long,
-        help = "The number of threads to use for concurrent processing (default: system default, i.e. number of logical CPUs)"
+        help = "Opt in to parallel execution with the given number of worker threads"
     )]
     threads: Option<usize>,
 
-    /// The git command and its arguments to execute (e.g., "pull", "status", etc.).
-    /// Defaults to "status" if not provided.
-    #[arg(required = false, num_args = 1..)]
+    /// The git command and its arguments to execute (e.g., "pull", "status",
+    /// etc.). Defaults to "status" if not provided.
+    #[arg(required = false, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
 
-/// Sets up the Rayon thread pool if a thread count is provided.
-fn setup_thread_pool(threads: Option<usize>) -> Result<(), Box<dyn Error>> {
-    if let Some(t) = threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(t)
-            .build_global()?;
-    }
-    Ok(())
-}
-
 /// Extracts the git command from the CLI arguments.
-/// Defaults to "status" if no command is provided.
-fn get_command_from_cli(cli: &Cli) -> String {
+fn git_command_from_cli(cli: &Cli) -> Vec<String> {
     if cli.command.is_empty() {
-        "status".to_string()
+        vec!["status".to_string()]
     } else {
-        cli.command.join(" ")
+        cli.command.clone()
     }
 }
 
-/// Processes repositories found under `current_dir` using the provided `git_processor`
-/// function concurrently.
-///
-/// The function uses a generic parameter `F` to ensure that `git_processor` implements
-/// both `Fn(&Path) -> Result<(), String>` and `Sync`.
-fn process_repositories<F>(current_dir: &Path, git_processor: &F)
-where
-    F: Fn(&Path) -> Result<(), String> + Sync,
-{
-    WalkDir::new(current_dir)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_dir())
-        .filter(|entry| grpgit::is_git_repo(entry.path()))
-        .par_bridge()
-        .for_each(|entry| {
-            let path = entry.path();
-            println!("Processing Git repository: {}", path.display());
-            if let Err(err) = grpgit::process_git_dir(path, git_processor) {
-                eprintln!("Error processing {}: {}", path.display(), err);
-            }
+/// Executes a git command across the discovered repositories. Processing is
+/// sequential by default and becomes parallel only when a thread count is
+/// provided.
+fn execute_repositories(
+    repositories: &[PathBuf],
+    git_args: &[String],
+    threads: Option<usize>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(thread_count) = threads.filter(|count| *count > 1) {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()?;
+
+        pool.install(|| {
+            repositories.par_iter().for_each(|repo_path| {
+                if let Err(err) = grpgit::process_repository(repo_path, git_args) {
+                    eprintln!("{err}");
+                }
+            });
         });
-}
-
-/// Main function initializes the program, parses CLI arguments, sets up the thread pool,
-/// and concurrently processes directories to execute a Git command in each Git repository.
-fn main() -> Result<(), Box<dyn Error>> {
-    // Parse command-line arguments using Clap.
-    let cli = Cli::parse();
-
-    // Set up the Rayon thread pool if needed.
-    setup_thread_pool(cli.threads)?;
-
-    // Determine the git command from CLI.
-    let command = get_command_from_cli(&cli);
-
-    // Get the current working directory.
-    let current_dir = env::current_dir()?;
-
-    // Create a processor closure that will run the Git command.
-    let git_processor = grpgit::create_git_processor(command);
-
-    // Process repositories concurrently.
-    process_repositories(current_dir.as_path(), &git_processor);
+    } else {
+        for repo_path in repositories {
+            if let Err(err) = grpgit::process_repository(repo_path, git_args) {
+                eprintln!("{err}");
+            }
+        }
+    }
 
     Ok(())
+}
+
+fn discover_repositories_from(current_dir: &Path) -> Vec<PathBuf> {
+    grpgit::discover_repositories(current_dir)
+}
+
+/// Main function initializes the program, parses CLI arguments, discovers git
+/// repositories, and executes the requested git command in each one.
+fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    let git_args = git_command_from_cli(&cli);
+    let current_dir = env::current_dir()?;
+    let repositories = discover_repositories_from(current_dir.as_path());
+
+    execute_repositories(&repositories, &git_args, cli.threads)
 }
 
 #[cfg(test)]
@@ -111,45 +97,57 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_get_command_from_cli_default() {
-        let cli = Cli::parse_from(&["grpr"]);
-        let cmd = get_command_from_cli(&cli);
-        assert_eq!(cmd, "status");
+    fn create_regular_repo(path: &Path) {
+        let git_dir = path.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("config"), "[core]\n").unwrap();
     }
 
     #[test]
-    fn test_get_command_from_cli_join() {
-        let cli = Cli::parse_from(&["grpr", "pull", "origin", "master"]);
-        let cmd = get_command_from_cli(&cli);
-        assert_eq!(cmd, "pull origin master");
+    fn git_command_defaults_to_status() {
+        let cli = Cli::parse_from(["grpr"]);
+
+        assert_eq!(git_command_from_cli(&cli), vec!["status"]);
     }
 
     #[test]
-    fn test_setup_thread_pool_default() {
-        // If no thread count is provided, the setup should succeed without error.
-        assert!(setup_thread_pool(None).is_ok());
+    fn git_command_preserves_multiple_arguments() {
+        let cli = Cli::parse_from(["grpr", "log", "--oneline", "--graph"]);
+
+        assert_eq!(
+            git_command_from_cli(&cli),
+            vec!["log", "--oneline", "--graph"]
+        );
     }
 
     #[test]
-    fn test_setup_thread_pool_custom() {
-        // Providing a thread count should also succeed.
-        assert!(setup_thread_pool(Some(4)).is_ok());
-    }
-
-    #[test]
-    fn test_process_repositories() {
-        // Create a temporary directory structure with a fake git repository.
-        let temp_dir = tempdir().unwrap();
-        let repo_dir = temp_dir.path().join("fake_repo");
+    fn discover_repositories_from_finds_root_level_repositories() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
         fs::create_dir_all(&repo_dir).unwrap();
-        // Create a dummy .git directory inside fake_repo.
-        fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        create_regular_repo(&repo_dir);
 
-        // Create a dummy git_processor that always returns Ok.
-        let dummy_processor = |_: &Path| -> Result<(), String> { Ok(()) };
+        let repositories = discover_repositories_from(dir.path());
 
-        // Run process_repositories; if no panic occurs, assume success.
-        process_repositories(temp_dir.path(), &dummy_processor);
+        assert_eq!(repositories, vec![repo_dir]);
+    }
+
+    #[test]
+    fn execute_repositories_succeeds_with_sequential_processing() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&repo_dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let repositories = vec![repo_dir];
+        let git_args = vec!["status".to_string()];
+
+        assert!(execute_repositories(&repositories, &git_args, None).is_ok());
     }
 }
