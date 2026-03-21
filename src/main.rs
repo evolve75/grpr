@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 
 mod grpgit;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// CLI represents the command-line arguments for grpr.
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = VERSION, about, long_about = None)]
 struct Cli {
     /// The number of threads to use for concurrent processing. When omitted,
     /// grpr scans and processes repositories sequentially for predictable
@@ -93,7 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use std::fs;
     use tempfile::tempdir;
 
@@ -118,6 +120,19 @@ mod tests {
             git_command_from_cli(&cli),
             vec!["log", "--oneline", "--graph"]
         );
+    }
+
+    #[test]
+    fn cli_version_matches_cargo_package_version() {
+        assert_eq!(VERSION, "2.0.0");
+        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn clap_renders_expected_version_string() {
+        let rendered = Cli::command().render_version().to_string();
+
+        assert_eq!(rendered.trim(), "grpr 2.0.0");
     }
 
     #[test]

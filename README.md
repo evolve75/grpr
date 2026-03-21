@@ -147,6 +147,10 @@ cargo run -- status
 cargo test
 ```
 
+The CLI version reported by `grpr --version` comes from `Cargo.toml`
+`package.version`. Release tags should mirror that version using the existing
+`v<major>.<minor>.<patch>` format.
+
 ### Project structure
 
 - `src/main.rs`: CLI parsing and repository execution orchestration
