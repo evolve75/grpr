@@ -12,7 +12,7 @@ VCS operation to `git`.
 
 ## Requirements
 
-- Rust 1.56 or later for building from source
+- Rust 1.85 or later for building from source
 - `git` must be available in your `PATH`
 
 ## Installation

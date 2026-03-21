@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn cli_version_matches_cargo_package_version() {
-        assert_eq!(VERSION, "2.0.0");
+        assert_eq!(VERSION, "2.0.1");
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
     }
 
@@ -132,7 +132,7 @@ mod tests {
     fn clap_renders_expected_version_string() {
         let rendered = Cli::command().render_version().to_string();
 
-        assert_eq!(rendered.trim(), "grpr 2.0.0");
+        assert_eq!(rendered.trim(), "grpr 2.0.1");
     }
 
     #[test]
