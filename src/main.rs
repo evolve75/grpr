@@ -89,6 +89,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let current_dir = env::current_dir()?;
     let repositories = discover_repositories_from(current_dir.as_path());
 
+    if repositories.is_empty() {
+        eprintln!(
+            "grpr: no git repositories found under {}",
+            current_dir.display()
+        );
+    }
+
     execute_repositories(&repositories, &git_args, cli.threads)
 }
 
@@ -124,7 +131,7 @@ mod tests {
 
     #[test]
     fn cli_version_matches_cargo_package_version() {
-        assert_eq!(VERSION, "2.0.1");
+        assert_eq!(VERSION, "2.0.2");
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
     }
 
@@ -132,7 +139,7 @@ mod tests {
     fn clap_renders_expected_version_string() {
         let rendered = Cli::command().render_version().to_string();
 
-        assert_eq!(rendered.trim(), "grpr 2.0.1");
+        assert_eq!(rendered.trim(), "grpr 2.0.2");
     }
 
     #[test]
